@@ -600,6 +600,7 @@ function menu:print_bindings(osd)
         osd:tab():item('ctrl+shift+h: '):text('Replay current subtitle'):newline()
         osd:tab():item('shift+h/l: '):text('Seek to the previous/next subtitle'):newline()
         osd:tab():item('alt+h/l: '):text('Seek to the previous/next subtitle and pause'):newline()
+        osd:tab():item('alt+m: '):text('temporary toggle two-line subtitles'):newline()
         osd:italics("Press "):item('i'):italics(" to hide mpvacious options."):newline()
     elseif self.hints_state.get() == 'menu' then
         osd:submenu('Menu bindings'):newline()
