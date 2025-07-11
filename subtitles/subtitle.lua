@@ -6,6 +6,7 @@ Subtitle class provides methods for storing and comparing subtitle lines.
 ]]
 
 local mp = require('mp')
+local h = require('helpers')
 
 local Subtitle = {
     ['text'] = '',
@@ -24,7 +25,7 @@ end
 function Subtitle:now(secondary)
     local prefix = secondary and "secondary-" or ""
     local this = self:new {
-        ['text'] = mp.get_property(prefix .. "sub-text"),
+        ['text'] = h.get_japanese_from_subtext(mp.get_property(prefix .. "sub-text")),
         ['start'] = mp.get_property_number(prefix .. "sub-start"),
         ['end'] = mp.get_property_number(prefix .. "sub-end"),
     }

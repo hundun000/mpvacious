@@ -151,6 +151,7 @@ self.copy_to_clipboard = function(_, text)
 end
 
 self.clipboard_prepare = function(text)
+    text = h.get_japanese_from_subtext(text)
     text = self.config.clipboard_trim_enabled and h.trim(text) or h.remove_newlines(text)
     text = self.maybe_remove_all_spaces(text)
     return text
