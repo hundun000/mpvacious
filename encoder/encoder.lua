@@ -118,7 +118,10 @@ end
 
 local function animated_scale_filter()
     return make_scale_filter(
-        'lanczos', self.config.animated_snapshot_width, self.config.animated_snapshot_height)
+            'lanczos',
+            self.config.animated_snapshot_width,
+            self.config.animated_snapshot_height
+    )
 end
 
 ffmpeg.make_static_snapshot_args = function(source_path, output_path, timestamp)
@@ -185,7 +188,10 @@ ffmpeg.make_animated_snapshot_args = function(source_path, output_path, start_ti
             '-map_metadata', '-1',
             '-loop', '0',
             '-vf', string.format(
-                'fps=%d,%s', self.config.animated_snapshot_fps, animated_scale_filter()),
+                    'fps=%d,%s',
+                    self.config.animated_snapshot_fps,
+                    animated_scale_filter()
+            ),
             h.unpack(encoder_args)
     )
     table.insert(args, output_path)
@@ -240,50 +246,50 @@ local function parse_loudnorm(loudnorm_targets, json_extractor, loudnorm_consume
     end
 end
 
+local function add_filter(filters, filter)
+    if #filters == 0 then
+        filters = filter
+    else
+        filters = string.format('%s,%s', filters, filter)
+    end
+end
+
+local function separate_filters(filters, new_args, args)
+    -- Would've strongly preferred
+    --     if args[i] == '-af' or args[i] == '-filter:a' then
+    --         i = i + 1
+    --         add_filter(args[i])
+    -- but https://lua.org/manual/5.4/manual.html#3.3.5 says that
+    -- "You should not change the value of the control variable during the loop."
+    local expect_filter = false
+    for i = 1, #args do
+        if args[i] == '-af' or args[i] == '-filter:a' then
+            expect_filter = true
+        else
+            if expect_filter then
+                add_filter(filters, args[i])
+            else
+                table.insert(new_args, args[i])
+            end
+            expect_filter = false
+        end
+    end
+end
+
 ffmpeg.append_user_audio_args = function(args)
     local new_args = {}
     local filters = ''
 
-    local function add_filter(flt)
-        if #filters == 0 then
-            filters = flt
-        else
-            filters = string.format('%s,%s', filters, flt)
-        end
-    end
-
-    local function separate_filters(args)
-        -- Would've strongly preferred
-        --     if args[i] == '-af' or arg == '-filter:a' then
-        --         i = i + 1
-        --         add_filter(args[i])
-        -- but https://lua.org/manual/5.4/manual.html#3.3.5 says that
-        -- "You should not change the value of the control variable during the loop."
-        local expect_filter = false
-        for i = 1, #args do
-            if args[i] == '-af' or arg == '-filter:a' then
-                expect_filter = true
-            else
-                if expect_filter then
-                    add_filter(args[i])
-                else
-                    table.insert(new_args, args[i])
-                end
-                expect_filter = false
-            end
-        end
-    end
-
-    separate_filters(args)
+    separate_filters(filters, new_args, args)
     if self.config.tie_volumes then
-        add_filter(string.format("volume=%.1f", mp.get_property_native('volume') / 100.0))
+        add_filter(filters, string.format("volume=%.1f", mp.get_property_native('volume') / 100.0))
     end
 
     local user_args = {}
     for arg in string.gmatch(self.config.ffmpeg_audio_args, "%S+") do
         table.insert(user_args, arg)
     end
-    separate_filters(user_args)
+    separate_filters(filters, new_args, user_args)
 
     if #filters > 0 then
         table.insert(new_args, '-af')
@@ -357,8 +363,10 @@ ffmpeg.make_audio_args = function(
     end
 
     local loudnorm_targets = make_loudnorm_targets()
-    local args = make_ffargs('-loglevel', 'info',
-                             '-af', loudnorm_targets .. ':print_format=json')
+    local args = make_ffargs(
+            '-loglevel', 'info',
+            '-af', loudnorm_targets .. ':print_format=json'
+    )
     table.insert(args, '-f')
     table.insert(args, 'null')
     table.insert(args, '-')
@@ -573,20 +581,24 @@ local create_static_snapshot = function(timestamp, source_path, output_path, on_
 
 end
 
-local report_creation_result = function(file_path)
+local report_creation_result = function(file_path, on_finish_fn)
     return function(success, result)
         -- result is nil on success for screenshot-to-file.
         if success and (result == nil or result.status == 0) and h.file_exists(file_path) then
             msg.info(string.format("Created file: %s", file_path))
-            return true
+            success = true
         else
             msg.error(string.format("Couldn't create file: %s", file_path))
-            return false
+            success = false
         end
+        if type(on_finish_fn) == 'function' then
+            on_finish_fn(success)
+        end
+        return success
     end
 end
 
-local create_snapshot = function(start_timestamp, end_timestamp, current_timestamp, filename)
+local create_snapshot = function(start_timestamp, end_timestamp, current_timestamp, filename, on_finish_fn)
     if h.is_empty(self.output_dir_path) then
         return msg.error("Output directory wasn't provided. Image file will not be created.")
     end
@@ -596,11 +608,11 @@ local create_snapshot = function(start_timestamp, end_timestamp, current_timesta
         local source_path = mp.get_property("path")
         local output_path = utils.join_path(self.output_dir_path, filename)
 
-        local on_finish = report_creation_result(output_path)
+        local on_finish_wrap = report_creation_result(output_path, on_finish_fn)
         if self.config.animated_snapshot_enabled then
-            create_animated_snapshot(start_timestamp, end_timestamp, source_path, output_path, on_finish)
+            create_animated_snapshot(start_timestamp, end_timestamp, source_path, output_path, on_finish_wrap)
         else
-            create_static_snapshot(current_timestamp, source_path, output_path, on_finish)
+            create_static_snapshot(current_timestamp, source_path, output_path, on_finish_wrap)
         end
     else
         print("Snapshot will not be created.")
@@ -614,7 +626,7 @@ local background_play = function(file_path, on_finish)
     )
 end
 
-local create_audio = function(start_timestamp, end_timestamp, filename, padding)
+local create_audio = function(start_timestamp, end_timestamp, filename, padding, on_finish_fn)
     if h.is_empty(self.output_dir_path) then
         return msg.error("Output directory wasn't provided. Audio file will not be created.")
     end
@@ -628,16 +640,15 @@ local create_audio = function(start_timestamp, end_timestamp, filename, padding)
         end
 
         local function start_encoding(args)
-            local on_finish = function(success, result)
-                local conversion_check = report_creation_result(output_path)
+            local on_finish_wrap = function(success, result)
+                local conversion_check = report_creation_result(output_path, on_finish_fn)
                 if conversion_check(success, result) and self.config.preview_audio then
                     background_play(output_path, function()
                         print("Played file: " .. output_path)
                     end)
                 end
             end
-
-            h.subprocess(args, on_finish)
+            h.subprocess(args, on_finish_wrap)
         end
 
         self.encoder.make_audio_args(
@@ -681,27 +692,33 @@ local set_output_dir = function(dir_path)
 end
 
 local create_job = function(type, sub, audio_padding)
-    local filename, run_async, current_timestamp
+    local current_timestamp, on_finish_fn
+    local job = {}
     if type == 'snapshot' and h.has_video_track() then
         current_timestamp = mp.get_property_number("time-pos", 0)
-        filename = make_snapshot_filename(sub['start'], sub['end'], current_timestamp)
-        run_async = function()
-            create_snapshot(sub['start'], sub['end'], current_timestamp, filename)
+        job.filename = make_snapshot_filename(sub['start'], sub['end'], current_timestamp)
+        job.run_async = function()
+            create_snapshot(sub['start'], sub['end'], current_timestamp, job.filename, on_finish_fn)
         end
     elseif type == 'audioclip' and h.has_audio_track() then
-        filename = make_audio_filename(sub['start'], sub['end'])
-        run_async = function()
-            create_audio(sub['start'], sub['end'], filename, audio_padding)
+        job.filename = make_audio_filename(sub['start'], sub['end'])
+        job.run_async = function()
+            create_audio(sub['start'], sub['end'], job.filename, audio_padding, on_finish_fn)
         end
     else
-        run_async = function()
+        job.filename = nil
+        job.run_async = function()
             print(type .. " will not be created.")
+            if type(on_finish_fn) == 'function' then
+                on_finish_fn()
+            end
         end
     end
-    return {
-        filename = filename,
-        run_async = run_async,
-    }
+    job.on_finish = function(fn)
+        on_finish_fn = fn
+        return job
+    end
+    return job
 end
 
 return {

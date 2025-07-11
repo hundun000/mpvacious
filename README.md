@@ -7,7 +7,7 @@
 [![AUR](https://img.shields.io/badge/AUR-install-blue.svg)](https://aur.archlinux.org/packages/mpv-mpvacious/)
 [![Chat](https://img.shields.io/badge/chat-join-green.svg)](https://tatsumoto-ren.github.io/blog/join-our-community.html)
 ![GitHub](https://img.shields.io/github/license/Ajatt-Tools/mpvacious)
-[![Patreon](https://img.shields.io/badge/support-patreon-orange)](https://www.patreon.com/bePatron?u=43555128)
+[![Donate](https://img.shields.io/badge/support-developer-orange)](https://tatsumoto.neocities.org/blog/donating-to-tatsumoto.html)
 
 mpvacious is your semi-automatic subs2srs for mpv.
 It supports multiple workflows and allows you to quickly create Anki cards
@@ -183,8 +183,9 @@ mpv doesn't tolerate spaces before and after `=`.
   <a href="https://github.com/Ajatt-Tools/mpvacious/blob/master/.github/RELEASE/subs2srs.conf">Example configuration file</a>
 </p>
 
-Sentence field should be first in the note type settings.
+If the first field is empty, it will be set contain the string `[empty]`.
 Otherwise, Anki won't allow mpvacious to add new notes.
+This won't happen if the sentence field is first in the note type settings.
 
 **Tip**: Try [our official note type](https://ankiweb.net/shared/info/1557722832)
 if you don't want to configure note fields yourself.
@@ -229,8 +230,14 @@ Ctrl+g       script-binding mpvacious-animated-snapshot-toggle
 
 Ctrl+n       script-binding mpvacious-export-note
 
+Ctrl+b       script-binding mpvacious-update-selected-note
+Ctrl+B       script-binding mpvacious-overwrite-selected-note
+
 Ctrl+m       script-binding mpvacious-update-last-note
 Ctrl+M       script-binding mpvacious-overwrite-last-note
+
+g            script-binding mpvacious-quick-card-menu-open
+Alt+g        script-binding mpvacious-quick-card-sel-menu-open
 
 Ctrl+c       script-binding mpvacious-copy-primary-sub-to-clipboard
 Ctrl+C       script-binding mpvacious-copy-secondary-sub-to-clipboard
@@ -258,6 +265,8 @@ mpv accepts both variants in `input.conf`.
 ## Usage
 
 * [Create a card](howto/create_card.md)
+* [Quick card creation](howto/create_quick_card.md)
+* [Updating selected cards](howto/update_selected_card.md)
 * [Open the "Add" dialog](howto/add_dialog.md)
 * [Usage with Rikaitan](howto/yomichan.md)
 * [Usage with GoldenDict](howto/goldendict.md)
@@ -279,6 +288,16 @@ mpv accepts both variants in `input.conf`.
 * <kbd>Ctrl+n</kbd> - Export a card with the currently visible subtitle line on the front.
 Use this when your subs are well-timed,
 and the target sentence doesn't span multiple subs.
+
+**Quick card creation:**
+
+* <kbd>g</kbd> - Quick card creation menu.
+* <kbd>Alt+g</kbd> - Quick card creation, card selection menu.
+
+**Update the selected cards:**
+
+* <kbd>Ctrl+b</kbd> - Append to the media fields of the selected Anki cards.
+* <kbd>Ctrl+Shift+b</kbd> - Overwrite media fields of the selected Anki cards.
 
 **Update the last card:**
 
@@ -309,6 +328,9 @@ and the target sentence doesn't span multiple subs.
 
 Advanced menu has the following options:
 
+* <kbd>f</kbd> - Increment number of cards to update. Only affects note updating, including quick card creation. The number of cards to update is reset to 1 upon updating a note.
+* <kbd>shift+f</kbd> - Decrement number of cards to update.
+
 * <kbd>c</kbd> - Interactive subtitle selection.
   The range of the currently displayed subtitle line is selected. The selection then grows both ways based on the following displayed lines.
   It does nothing if there are no subs on screen.
@@ -332,6 +354,10 @@ The default selection spans across the selected start point and the end of the s
 The default selection spans across the selected end point and the start of the subtitle line.
 
 Then, as earlier, press <kbd>n</kbd> to make the card.
+
+Alternatively:
+* <kbd>m</kbd> to update the last card(s). (<kbd>Shift+m</kbd> to overwrite)
+* <kbd>b</kbd> to update the selected card(s). (<kbd>Shift+b</kbd> to overwrite)
 
 **Tip**: change playback speed by pressing <kbd>[</kbd> and <kbd>]</kbd>
 to precisely mark start and end of the phrase.
@@ -447,6 +473,14 @@ Specify only the ones you want to be different from the default.
 
 To cycle profiles, open the advanced menu by pressing <kbd>a</kbd> and then press <kbd>p</kbd>.
 At any time you can see what profile is active in the menu's status bar.
+
+## Running tests
+
+```bash
+MPVACIOUS_TEST=TRUE mpv 'path/to/some/file.mkv'
+```
+
+The results will be printed to the console.
 
 ## Hacking
 

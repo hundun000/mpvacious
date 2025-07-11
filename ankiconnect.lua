@@ -11,6 +11,10 @@ local h = require('helpers')
 local self = {}
 
 self.execute = function(request, completion_fn)
+    if not h.is_empty(self.config.ankiconnect_api_key) then
+        request.key = self.config.ankiconnect_api_key
+    end
+
     -- utils.format_json returns a string
     -- On error, request_json will contain "null", not nil.
     local request_json, error = utils.format_json(request)
@@ -106,6 +110,7 @@ self.add_note = function(note_fields, tag, gui)
         local note_id, error = self.parse_result(result)
         if not error then
             h.notify(string.format("Note added. ID = %s.", note_id))
+            self.gui_browse("nid:" .. note_id) -- show the added note
         else
             h.notify(string.format("Error: %s.", error), "error", 2)
         end
@@ -113,7 +118,7 @@ self.add_note = function(note_fields, tag, gui)
     self.execute(args, result_notify)
 end
 
-self.get_last_note_id = function()
+self.get_last_note_ids = function(n_cards)
     local ret = self.execute {
         action = "findNotes",
         version = 6,
@@ -125,10 +130,20 @@ self.get_last_note_id = function()
     local note_ids, _ = self.parse_result(ret)
 
     if not h.is_empty(note_ids) then
-        return h.max_num(note_ids)
+        return h.get_last_n_added_notes(note_ids, n_cards)
     else
-        return -1
+        return {}
     end
+end
+
+self.get_selected_note_ids = function()
+    local ret = self.execute {
+        action = "guiSelectedNotes",
+        version = 6
+    }
+
+    local note_ids, _ = self.parse_result(ret)
+    return note_ids
 end
 
 self.get_note_fields = function(note_id)
@@ -153,7 +168,31 @@ self.get_note_fields = function(note_id)
     end
 end
 
+self.get_first_field = function(model_name)
+    local ret = self.execute {
+        action = "findModelsByName",
+        version = 6,
+        params = {
+            modelNames = { model_name }
+        }
+    }
+
+    local result, error = self.parse_result(ret)
+
+    if error == nil then
+        for _, field in pairs(result[1].flds) do
+            if field.ord == 0 then
+                return field.name
+            end
+        end
+    else
+        msg.error(string.format("Couldn't retrieve the first field's name of note type %s: %s", model_name, error))
+        return nil
+    end
+end
+
 self.gui_browse = function(query)
+    --- query is a string, e.g. "deck:current", "nid:12345"
     if not self.config.disable_gui_browse then
         self.execute {
             action = 'guiBrowse',
@@ -178,7 +217,7 @@ self.add_tag = function(note_id, tag)
     end
 end
 
-self.append_media = function(note_id, fields, create_media_fn, tag)
+self.append_media = function(note_id, fields, tag, on_finish_fn)
     -- AnkiConnect will fail to update the note if it's selected in the Anki Browser.
     -- https://github.com/FooSoft/anki-connect/issues/82
     -- Switch focus from the current note to avoid it.
@@ -195,19 +234,17 @@ self.append_media = function(note_id, fields, create_media_fn, tag)
         }
     }
 
-    local on_finish = function(_, result, _)
+    local on_finish_wrap = function(_, result, _)
         local _, error = self.parse_result(result)
         if not error then
-            create_media_fn()
             self.add_tag(note_id, tag)
-            self.gui_browse(string.format("nid:%s", note_id)) -- select the updated note in the card browser
-            h.notify(string.format("Note #%s updated.", note_id))
         else
             h.notify(string.format("Error: %s.", error), "error", 2)
         end
+        on_finish_fn(error)
     end
 
-    self.execute(args, on_finish)
+    self.execute(args, on_finish_wrap)
 end
 
 self.init = function(config, platform)

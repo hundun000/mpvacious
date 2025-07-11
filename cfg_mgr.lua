@@ -5,13 +5,18 @@ License: GNU GPL, version 3 or later; http://www.gnu.org/licenses/gpl.html
 Config management, validation, loading.
 ]]
 
+local mp = require('mp')
 local mpopt = require('mp.options')
 local msg = require('mp.msg')
 local h = require('helpers')
+local utils = require('mp.utils')
 
 local min_side_px = 42
-local max_side_px = 640
-local default_height_px = 200
+local max_side_px = 1920
+local default_height_px = 350
+
+-- Measure quality from 0 (worst/lowest) to 100 (best/highest)
+local default_image_quality = 15
 
 -- This constant should be used in place of width and/or height in the config file.
 -- It tells the encoder to preserve aspect ratio when downscaling snapshots.
@@ -85,7 +90,7 @@ local function conditionally_set_defaults(width, height, quality)
         self.config[height] = default_height_px
     end
     if self.config[quality] < 0 or self.config[quality] > 100 then
-        self.config[quality] = 15
+        self.config[quality] = default_image_quality
     end
 end
 
@@ -179,7 +184,44 @@ local function next_profile()
     reload_from_disk()
 end
 
+local function create_config_file()
+    local name = default_profile_filename
+    -- ~/.config/mpv/scripts/ and the mpvacious dir
+    local parent, child = utils.split_path(mp.get_script_directory())
+    -- ~/.config/mpv/ and "scripts"
+    parent, child = utils.split_path(parent:gsub("/$", ""))
+    -- ~/.config/mpv/script-opts/subs2srs.conf
+    local config_filepath = utils.join_path(utils.join_path(parent, "script-opts"), string.format('%s.conf', name))
+    local example_config_filepath = utils.join_path(mp.get_script_directory(), ".github/RELEASE/subs2srs.conf")
+
+    local file_info = utils.file_info(config_filepath)
+    if file_info and file_info.is_file then
+        print("config already exists")
+        return
+    end
+
+    local handle = io.open(example_config_filepath, 'r')
+    if handle == nil then
+        return
+    end
+
+    local content = handle:read("*a")
+    handle:close()
+
+    handle = io.open(config_filepath, 'w')
+    if handle == nil then
+        h.notify(string.format("Couldn't open %s.", config_filepath), "error", 4)
+        return
+    end
+
+    handle:write(string.format("# Written by %s on %s.\n", name, os.date()))
+    handle:write(content)
+    handle:close()
+    h.notify("Settings saved.", "info", 2)
+end
+
 local function init(config_table, profiles_table)
+    create_config_file()
     self.config, self.profiles = config_table, profiles_table
     -- 'subs2srs' is the main profile, it is always loaded. 'active profile' overrides it afterwards.
     -- initial state is saved to another table to maintain consistency when cycling through incomplete profiles.

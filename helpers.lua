@@ -16,6 +16,14 @@ this.remove_all_spaces = function(str)
     return str:gsub('%s*', '')
 end
 
+this.as_callback = function(fn, ...)
+    --- Convenience utility.
+    local args = { ... }
+    return function()
+        return fn(this.unpack(args))
+    end
+end
+
 this.table_get = function(table, key, default)
     if table[key] == nil then
         return default or 'nil'
@@ -32,6 +40,11 @@ this.max_num = function(table)
         end
     end
     return max
+end
+
+this.get_last_n_added_notes = function(note_ids, n)
+    table.sort(note_ids)
+    return { this.unpack(note_ids, math.max(#note_ids - n + 1, 1), #note_ids) }
 end
 
 this.contains = function(table, element)
@@ -68,10 +81,13 @@ local function map(tab, func)
 end
 
 local function args_as_str(args)
-    return table.concat(map(args, function(str) return string.format("'%s'", str) end), " ")
+    local function single_quote(str)
+        return string.format("'%s'", str)
+    end
+    return table.concat(map(args, single_quote), " ")
 end
 
-this.subprocess = function(args, completion_fn)
+this.subprocess = function(args, completion_fn, override_settings)
     -- if `completion_fn` is passed, the command is ran asynchronously,
     -- and upon completion, `completion_fn` is called to process the results.
     msg.info("Executing: " .. args_as_str(args))
@@ -83,6 +99,11 @@ this.subprocess = function(args, completion_fn)
         capture_stderr = true,
         args = args
     }
+    if not this.is_empty(override_settings) then
+        for k, v in pairs(override_settings) do
+            command_table[k] = v
+        end
+    end
     return command_native(command_table, completion_fn)
 end
 
@@ -167,6 +188,13 @@ end
 this.containsNonSimplifiedChinese = function(str)
     -- 简单判断是否包含日文汉字的范围，例如，常用日文汉字 (这个范围可能需要根据需求进一步细化)
     return str:match("[\228\184\128-\233\191\191]")
+this.subprocess_detached = function(args, completion_fn)
+    local overwrite_settings = {
+        detach = true,
+        capture_stdout = false,
+        capture_stderr = false,
+    }
+    return this.subprocess(args, completion_fn, overwrite_settings)
 end
 
 this.is_empty = function(var)
@@ -327,8 +355,18 @@ this.has_audio_track = function()
     return mp.get_property_native('aid') ~= false
 end
 
-this.str_contains = function(s, pattern)
-    return not this.is_empty(s) and string.find(string.lower(s), string.lower(pattern)) ~= nil
+this.str_contains = function(str, pattern, search_plain)
+    --- Return True if 'pattern' can be found in 'str'.
+    --- Matching is case-insensitive.
+    --- If 'search_plain' is True, turns off the pattern matching facilities.
+    return not this.is_empty(str) and string.find(string.lower(str), string.lower(pattern), 1, search_plain) ~= nil
+end
+
+this.is_substr = function(str, substr)
+    --- Return True if 'substr' is a substring of 'str'.
+    --- Matching is case-insensitive.
+    --- Plain search is used == turns off the pattern matching facilities.
+    return this.str_contains(str, substr, true)
 end
 
 this.filter = function(arr, func)
@@ -351,9 +389,74 @@ this.file_exists = function(filepath)
     return false
 end
 
+this.equal = function(first, last)
+    --- Test whether two values are equal
+    if type(last) == 'table' then
+        return (utils.format_json(first) == utils.format_json(last))
+    else
+        return (first == last)
+    end
+end
+
 this.get_loaded_tracks = function(track_type)
     --- Return all sub tracks, audio tracks, etc.
-    return this.filter(mp.get_property_native('track-list'), function(track) return track.type == track_type end)
+    local function tracks_equal(track)
+        return track.type == track_type
+    end
+    return this.filter(mp.get_property_native('track-list'), tracks_equal)
+end
+
+this.assert_equals = function(actual, expected)
+    if this.equal(actual, expected) == false then
+        mp.commandv("quit")
+        error(string.format("TEST FAILED: Expected '%s', got '%s'", expected, actual))
+    end
+end
+
+this.run_tests = function()
+    this.assert_equals(this.is_substr("abcd", "bc"), true)
+    this.assert_equals(this.is_substr("abcd", "xyz"), false)
+    this.assert_equals(this.is_substr("abcd", "^.*d.*$"), false)
+    this.assert_equals(this.str_contains("abcd", "^.*d.*$"), true)
+    this.assert_equals(this.str_contains("abcd", "^.*z.*$"), false)
+
+    local ep_num_to_filename = {
+        { nil, "A Whisker Away.mkv" },
+        { nil, "[Placeholder] Gekijouban SHIROBAKO [Ma10p_1080p][x265_flac]" },
+        { "06", "[Placeholder] Sono Bisque Doll wa Koi wo Suru - 06 [54E495D0]" },
+        { "02", "(Hi10)_Kobayashi-san_Chi_no_Maid_Dragon_-_02_(BD_1080p)_(Placeholder)_(12C5D2B4)" },
+        { "01", "[Placeholder] Koi to Yobu ni wa Kimochi Warui - 01 (1080p) [D517C9F0]" },
+        { "01", "[Placeholder] Tsukimonogatari 01 [BD 1080p x264 10-bit FLAC] [5CD88145]" },
+        { "01", "[Placeholder] 86 - Eighty Six - 01 (1080p) [1B13598F]" },
+        { "00", "[Placeholder] Fate Stay Night - Unlimited Blade Works - 00 (BD 1080p Hi10 FLAC) [95590B7F]" },
+        { "01", "House, M.D. S01E01 Pilot - Everybody Lies (1080p x265 Placeholder)" },
+        { "165", "A Generic Episode-165" }
+    }
+
+    for _, case in pairs(ep_num_to_filename) do
+        local expected, filename = this.unpack(case)
+        local _, _, episode_num = this.get_episode_number(filename)
+        this.assert_equals(episode_num, expected)
+    end
+end
+
+this.deep_copy = function(obj, seen)
+    -- Handle non-tables and previously-seen tables.
+    if type(obj) ~= 'table' then
+        return obj
+    end
+    if seen and seen[obj] then
+        return seen[obj]
+    end
+
+    -- New table; mark it as seen and copy recursively.
+    local s = seen or {}
+    local res = {}
+    s[obj] = res
+    for k, v in pairs(obj) do
+        res[this.deep_copy(k, s)] = this.deep_copy(v, s)
+    end
+    return setmetatable(res, getmetatable(obj))
 end
 
 return this

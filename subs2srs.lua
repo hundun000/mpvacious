@@ -36,21 +36,48 @@ For complete usage guide, see <https://github.com/Ajatt-Tools/mpvacious/blob/mas
 ]]
 
 local mp = require('mp')
-local utils = require('mp.utils')
 local OSD = require('osd_styler')
 local cfg_mgr = require('cfg_mgr')
-local encoder = require('encoder')
+local encoder = require('encoder.encoder')
 local h = require('helpers')
 local Menu = require('menu')
 local ankiconnect = require('ankiconnect')
 local switch = require('utils.switch')
+local dec_counter = require('utils.dec_counter')
 local play_control = require('utils.play_control')
 local secondary_sid = require('subtitles.secondary_sid')
 local platform = require('platform.init')
 local forvo = require('utils.forvo')
 local subs_observer = require('subtitles.observer')
-local menu
+local codec_support = require('encoder.codec_support')
 
+local menu, quick_menu, quick_menu_card
+local quick_creation_opts = {
+    _n_lines = nil,
+    _n_cards = 1,
+    set_cards = function(self, n)
+        self._n_cards = math.max(0, n)
+    end,
+    set_lines = function(self, n)
+        self._n_lines = math.max(0, n)
+    end,
+    get_cards = function(self)
+        return self._n_cards
+    end,
+    get_lines = function(self)
+        return self._n_lines
+    end,
+    increment_cards = function(self)
+        self:set_cards(self._n_cards + 1)
+    end,
+    decrement_cards = function(self)
+        self:set_cards(self._n_cards - 1)
+    end,
+    clear_options = function(self)
+        self._n_lines = nil
+        self._n_cards = 1
+    end
+}
 ------------------------------------------------------------
 -- default config
 
@@ -62,6 +89,7 @@ local config = {
     clipboard_trim_enabled = true, -- remove unnecessary characters from strings before copying to the clipboard
     use_ffmpeg = false, -- if set to true, use ffmpeg to create audio clips and snapshots. by default use mpv.
     reload_config_before_card_creation = true, -- for convenience, read config file from disk before a card is made.
+    card_overwrite_safeguard = 1, -- a safeguard for accidentally overwriting more cards than intended.
 
     -- Clipboard and external communication
     autoclip = false, -- enable copying subs to the clipboard when mpv starts
@@ -131,6 +159,7 @@ local config = {
     append_media = true, -- True to append video media after existing data, false to insert media before
     disable_gui_browse = false, -- Lets you disable anki browser manipulation by mpvacious.
     ankiconnect_url = '127.0.0.1:8765',
+    ankiconnect_api_key = '',
 
     -- Note tagging
     -- The tag(s) added to new notes. Spaces separate multiple tags.
@@ -166,10 +195,8 @@ local profiles = {
     active = "subs2srs",
 }
 
-
 ------------------------------------------------------------
 -- utility functions
-
 local function _(params)
     return function()
         return pcall(h.unpack(params))
@@ -181,31 +208,6 @@ local function escape_for_osd(str)
     str = str:gsub('[%[%]{}]', '')
     return str
 end
-
-local codec_support = (function()
-    local ovc_help = h.subprocess { 'mpv', '--ovc=help' }
-    local oac_help = h.subprocess { 'mpv', '--oac=help' }
-
-    local function is_audio_supported(codec)
-        return oac_help.status == 0 and oac_help.stdout:match('--oac=' .. codec) ~= nil
-    end
-
-    local function is_image_supported(codec)
-        return ovc_help.status == 0 and ovc_help.stdout:match('--ovc=' .. codec) ~= nil
-    end
-
-    return {
-        snapshot = {
-            ['libaom-av1'] = is_image_supported('libaom-av1'),
-            libwebp = is_image_supported('libwebp'),
-            mjpeg = is_image_supported('mjpeg'),
-        },
-        audio = {
-            libmp3lame = is_audio_supported('libmp3lame'),
-            libopus = is_audio_supported('libopus'),
-        },
-    }
-end)()
 
 local function ensure_deck()
     if config.create_deck == true then
@@ -312,10 +314,28 @@ local function construct_note_fields(sub_text, secondary_text, snapshot_filename
     return ret
 end
 
-local function join_media_fields(new_data, stored_data)
-    for _, field in pairs { config.audio_field, config.image_field, config.miscinfo_field } do
+local function join_field_content(new_text, old_text, separator)
+    -- By default, join fields with a HTML newline.
+    separator = separator or "<br>"
+
+    if h.is_empty(old_text) then
+        -- If 'old_text' is empty, there's no need to join content with the separator.
+        return new_text
+    end
+
+    if h.is_substr(old_text, new_text) then
+        -- If 'old_text' (field) already contains new_text (sentence, image, audio, etc.),
+        -- there's no need to add 'new_text' to 'old_text'.
+        return old_text
+    end
+
+    return string.format("%s%s%s", old_text, separator, new_text)
+end
+
+local function join_fields(new_data, stored_data)
+    for _, field in pairs { config.audio_field, config.image_field, config.miscinfo_field, config.sentence_field, config.secondary_field } do
         if not h.is_empty(field) then
-            new_data[field] = h.table_get(stored_data, field, "") .. h.table_get(new_data, field, "")
+            new_data[field] = join_field_content(h.table_get(new_data, field, ""), h.table_get(stored_data, field, ""))
         end
     end
     return new_data
@@ -323,7 +343,7 @@ end
 
 local function update_sentence(new_data, stored_data)
     -- adds support for TSCs
-    -- https://tatsumoto-ren.github.io/blog/discussing-various-card-templates.html#targeted-sentence-cards-or-mpvacious-cards
+    -- https://tatsumoto-ren.github.io/blog/discussing-various-card-templates.html#targeted-sentence-cards
     -- if the target word was marked by yomichan, this function makes sure that the highlighting doesn't get erased.
 
     if h.is_empty(stored_data[config.sentence_field]) then
@@ -371,7 +391,7 @@ end
 
 local function export_to_anki(gui)
     maybe_reload_config()
-    local sub = subs_observer.collect()
+    local sub = subs_observer.collect_from_current()
 
     if not sub:is_valid() then
         return h.notify("Nothing to export.", "warn", 1)
@@ -388,16 +408,77 @@ local function export_to_anki(gui)
     snapshot.run_async()
     audio.run_async()
 
+    local first_field = ankiconnect.get_first_field(config.model_name)
     local note_fields = construct_note_fields(sub['text'], sub['secondary'], snapshot.filename, audio.filename)
+
+    if not h.is_empty(first_field) and h.is_empty(note_fields[first_field]) then
+        note_fields[first_field] = "[empty]"
+    end
 
     ankiconnect.add_note(note_fields, substitute_fmt(config.note_tag), gui)
     subs_observer.clear()
 end
 
-local function update_last_note(overwrite)
-    maybe_reload_config()
-    local sub = subs_observer.collect()
-    local last_note_id = ankiconnect.get_last_note_id()
+local function notify_user_on_finish(note_ids)
+    --- Run this callback once all notes are changed.
+
+    -- Construct a search query for the Anki Browser.
+    local queries = {}
+    for _, note_id in ipairs(note_ids) do
+        table.insert(queries, string.format("nid:%s", tostring(note_id)))
+    end
+    local query = table.concat(queries, " OR ")
+    ankiconnect.gui_browse(query)
+
+    -- Notify the user.
+    if #note_ids > 1 then
+        h.notify(string.format("Updated %i notes.", #note_ids))
+    else
+        h.notify(string.format("Updated note #%s.", tostring(note_ids[1])))
+    end
+end
+
+local function make_new_note_data(stored_data, new_data, overwrite)
+    if stored_data then
+        new_data = forvo.append(new_data, stored_data)
+        new_data = update_sentence(new_data, stored_data)
+        if not overwrite then
+            if config.append_media then
+                new_data = join_fields(new_data, stored_data)
+            else
+                new_data = join_fields(stored_data, new_data)
+            end
+        end
+    end
+    -- If the text is still empty, put some dummy text to let the user know why
+    -- there's no text in the sentence field.
+    if h.is_empty(new_data[config.sentence_field]) then
+        new_data[config.sentence_field] = string.format("mpvacious wasn't able to grab subtitles (%s)", os.time())
+    end
+    return new_data
+end
+
+local function change_fields(note_ids, new_data, overwrite)
+    --- Run this callback once audio and image files are created.
+    local change_notes_countdown = dec_counter.new(#note_ids).on_finish(h.as_callback(notify_user_on_finish, note_ids))
+    for _, note_id in pairs(note_ids) do
+        ankiconnect.append_media(
+                note_id,
+                make_new_note_data(ankiconnect.get_note_fields(note_id), h.deep_copy(new_data), overwrite),
+                substitute_fmt(config.note_tag),
+                change_notes_countdown.decrease
+        )
+    end
+end
+
+local function update_notes(note_ids, overwrite)
+    local sub
+    local n_lines = quick_creation_opts:get_lines()
+    if n_lines then
+        sub = subs_observer.collect_from_all_dialogues(n_lines)
+    else
+        sub = subs_observer.collect_from_current()
+    end
 
     if not sub:is_valid() then
         return h.notify("Nothing to export. Have you set the timings?", "warn", 2)
@@ -411,43 +492,52 @@ local function update_last_note(overwrite)
         sub['text'] = nil
     end
 
-    if last_note_id < h.minutes_ago(10) then
+    local anki_media_dir = get_anki_media_dir_path()
+    encoder.set_output_dir(anki_media_dir)
+    forvo.set_output_dir(anki_media_dir)
+
+    local snapshot = encoder.snapshot.create_job(sub)
+    local audio = encoder.audio.create_job(sub, audio_padding())
+    local new_data = construct_note_fields(sub['text'], sub['secondary'], snapshot.filename, audio.filename)
+    local create_files_countdown = dec_counter.new(2).on_finish(h.as_callback(change_fields, note_ids, new_data, overwrite))
+
+    snapshot.on_finish(create_files_countdown.decrease).run_async()
+    audio.on_finish(create_files_countdown.decrease).run_async()
+
+    subs_observer.clear()
+    quick_creation_opts:clear_options()
+end
+
+local function update_last_note(overwrite)
+    maybe_reload_config()
+
+    local n_cards = quick_creation_opts:get_cards()
+    -- this now returns a table
+    local last_note_ids = ankiconnect.get_last_note_ids(n_cards)
+    n_cards = #last_note_ids
+
+    --first element is the earliest
+    if h.is_empty(last_note_ids) or last_note_ids[1] < h.minutes_ago(10) then
         return h.notify("Couldn't find the target note.", "warn", 2)
     end
 
-    local anki_media_dir = get_anki_media_dir_path()
-    encoder.set_output_dir(anki_media_dir)
-    local snapshot = encoder.snapshot.create_job(sub)
-    local audio = encoder.audio.create_job(sub, audio_padding())
+    update_notes(last_note_ids, overwrite)
+end
 
-    local create_media = function()
-        snapshot.run_async()
-        audio.run_async()
+local function update_selected_note(overwrite)
+    maybe_reload_config()
+
+    local selected_note_ids = ankiconnect.get_selected_note_ids()
+
+    if h.is_empty(selected_note_ids) then
+        return h.notify("Couldn't find the target note(s). Did you select the notes you want in Anki?", "warn", 3)
     end
 
-    local new_data = construct_note_fields(sub['text'], sub['secondary'], snapshot.filename, audio.filename)
-    local stored_data = ankiconnect.get_note_fields(last_note_id)
-    if stored_data then
-        forvo.set_output_dir(anki_media_dir)
-        new_data = forvo.append(new_data, stored_data)
-        new_data = update_sentence(new_data, stored_data)
-        if not overwrite then
-            if config.append_media then
-                new_data = join_media_fields(new_data, stored_data)
-            else
-                new_data = join_media_fields(stored_data, new_data)
-            end
-        end
+    if #selected_note_ids > config.card_overwrite_safeguard then
+        return h.notify(string.format("More than %i notes selected\nnot recommended, but you can change the limit in your config", config.card_overwrite_safeguard), "warn", 4)
     end
 
-    -- If the text is still empty, put some dummy text to let the user know why
-    -- there's no text in the sentence field.
-    if h.is_empty(new_data[config.sentence_field]) then
-        new_data[config.sentence_field] = string.format("mpvacious wasn't able to grab subtitles (%s)", os.time())
-    end
-
-    ankiconnect.append_media(last_note_id, new_data, create_media, substitute_fmt(config.note_tag))
-    subs_observer.clear()
+    update_notes(selected_note_ids, overwrite)
 end
 
 ------------------------------------------------------------
@@ -466,14 +556,26 @@ menu.keybindings = {
     { key = 'r', fn = menu:with_update { subs_observer.clear_and_notify } },
     { key = 'g', fn = menu:with_update { export_to_anki, true } },
     { key = 'n', fn = menu:with_update { export_to_anki, false } },
+    { key = 'b', fn = menu:with_update { update_selected_note, false } },
+    { key = 'B', fn = menu:with_update { update_selected_note, true } },
     { key = 'm', fn = menu:with_update { update_last_note, false } },
     { key = 'M', fn = menu:with_update { update_last_note, true } },
+    { key = 'f', fn = menu:with_update { function()
+        quick_creation_opts:increment_cards()
+    end } },
+    { key = 'F', fn = menu:with_update { function()
+        quick_creation_opts:decrement_cards()
+    end } },
     { key = 't', fn = menu:with_update { subs_observer.toggle_autocopy } },
     { key = 'T', fn = menu:with_update { subs_observer.next_autoclip_method } },
     { key = 'i', fn = menu:with_update { menu.hints_state.bump } },
     { key = 'p', fn = menu:with_update { load_next_profile } },
-    { key = 'ESC', fn = function() menu:close() end },
-    { key = 'q', fn = function() menu:close() end },
+    { key = 'ESC', fn = function()
+        menu:close()
+    end },
+    { key = 'q', fn = function()
+        menu:close()
+    end },
 }
 
 function menu:print_header(osd)
@@ -486,6 +588,7 @@ function menu:print_header(osd)
     osd:item('Clipboard autocopy: '):text(subs_observer.autocopy_status_str()):newline()
     osd:item('Active profile: '):text(profiles.active):newline()
     osd:item('Deck: '):text(config.deck_name):newline()
+    osd:item('# cards: '):text(quick_creation_opts:get_cards()):newline()
 end
 
 function menu:print_bindings(osd)
@@ -505,9 +608,11 @@ function menu:print_bindings(osd)
         osd:tab():item('e: '):text('Set end time to current position'):newline()
         osd:tab():item('shift+s: '):text('Set start time to current subtitle'):newline()
         osd:tab():item('shift+e: '):text('Set end time to current subtitle'):newline()
+        osd:tab():item('f: '):text('Increment # cards to update '):italics('(+shift to decrement)'):newline()
         osd:tab():item('r: '):text('Reset timings'):newline()
         osd:tab():item('n: '):text('Export note'):newline()
         osd:tab():item('g: '):text('GUI export'):newline()
+        osd:tab():item('b: '):text('Update the selected note'):italics('(+shift to overwrite)'):newline()
         osd:tab():item('m: '):text('Update the last added note '):italics('(+shift to overwrite)'):newline()
         osd:tab():item('t: '):text('Toggle clipboard autocopy'):newline()
         osd:tab():item('T: '):text('Switch to the next clipboard method'):newline()
@@ -576,15 +681,124 @@ function menu:make_osd()
 end
 
 ------------------------------------------------------------
+--quick_menu line selection
+local choose_cards = function(i)
+    quick_creation_opts:set_cards(i)
+    quick_menu_card:close()
+    quick_menu:open()
+end
+local choose_lines = function(i)
+    quick_creation_opts:set_lines(i)
+    update_last_note(true)
+    quick_menu:close()
+end
+
+quick_menu = Menu:new()
+quick_menu.keybindings = {}
+for i = 1, 9 do
+    table.insert(quick_menu.keybindings, { key = tostring(i), fn = function()
+        choose_lines(i)
+    end })
+end
+table.insert(quick_menu.keybindings, { key = 'g', fn = function()
+    choose_lines(1)
+end })
+table.insert(quick_menu.keybindings, { key = 'ESC', fn = function()
+    quick_menu:close()
+end })
+table.insert(quick_menu.keybindings, { key = 'q', fn = function()
+    quick_menu:close()
+end })
+function quick_menu:print_header(osd)
+    osd:submenu('quick card creation: line selection'):newline()
+    osd:item('# lines: '):text('Enter 1-9'):newline()
+end
+function quick_menu:print_legend(osd)
+    osd:new_layer():size(config.menu_font_size):font(config.menu_font_name):align(4)
+    self:print_header(osd)
+    menu:warn_formats(osd)
+end
+function quick_menu:make_osd()
+    local osd = OSD:new()
+    self:print_legend(osd)
+    return osd
+end
+
+-- quick_menu card selection
+quick_menu_card = Menu:new()
+quick_menu_card.keybindings = {}
+for i = 1, 9 do
+    table.insert(quick_menu_card.keybindings, { key = tostring(i), fn = function()
+        choose_cards(i)
+    end })
+end
+table.insert(quick_menu_card.keybindings, { key = 'ESC', fn = function()
+    quick_menu_card:close()
+end })
+table.insert(quick_menu_card.keybindings, { key = 'q', fn = function()
+    quick_menu_card:close()
+end })
+function quick_menu_card:print_header(osd)
+    osd:submenu('quick card creation: card selection'):newline()
+    osd:item('# cards: '):text('Enter 1-9'):newline()
+end
+function quick_menu_card:print_legend(osd)
+    osd:new_layer():size(config.menu_font_size):font(config.menu_font_name):align(4)
+    self:print_header(osd)
+    menu:warn_formats(osd)
+end
+function quick_menu_card:make_osd()
+    local osd = OSD:new()
+    self:print_legend(osd)
+    return osd
+end
+
+local function run_tests()
+    h.run_tests()
+    local new_note = {
+        SentKanji = "それは…分からんよ",
+        SentAudio = "[sound:s01e13_02m25s010ms_02m27s640ms.ogg]",
+        SentEng = "Well...",
+        Image = '<img alt="snapshot" src="s01e13_02m25s561ms.avif">'
+    }
+    local old_note = {
+        SentAudio = "[sound:s01e13_02m21s340ms_02m24s140ms.ogg]",
+        Image = '<img alt="snapshot" src="s01e13_02m22s225ms.avif">',
+        VocabAudio = "",
+        Notes = "",
+        VocabDef = "",
+        SentKanji = "勝ちって何に？",
+        SentEng = "What would we win, exactly?",
+    }
+    local result = join_fields(new_note, old_note)
+    local expected = {
+        SentKanji = "勝ちって何に？<br>それは…分からんよ",
+        SentAudio = "[sound:s01e13_02m21s340ms_02m24s140ms.ogg]<br>[sound:s01e13_02m25s010ms_02m27s640ms.ogg]",
+        SentEng = "What would we win, exactly?<br>Well...",
+        Image = '<img alt="snapshot" src="s01e13_02m22s225ms.avif"><br><img alt="snapshot" src="s01e13_02m25s561ms.avif">',
+        Notes = "",
+    }
+    h.assert_equals(result, expected)
+end
+
+------------------------------------------------------------
 -- main
 
 local main = (function()
     local main_executed = false
     return function()
         if main_executed then
+            subs_observer.clear_all_dialogs()
             return
         else
             main_executed = true
+        end
+        if os.getenv("MPVACIOUS_TEST") == "TRUE" then
+            -- at this point, other tests in submodules should have been finished.
+            mp.msg.warn("RUNNING TESTS")
+            run_tests()
+            mp.msg.warn("TESTS PASSED")
+            mp.commandv("quit")
         end
 
         cfg_mgr.init(config, profiles)
@@ -608,14 +822,25 @@ local main = (function()
         mp.add_key_binding("Ctrl+j", "mpvacious-secondary-sid-next", secondary_sid.select_next)
 
         -- Open advanced menu
-        mp.add_key_binding("a", "mpvacious-menu-open", function() menu:open() end)
+        mp.add_key_binding("a", "mpvacious-menu-open", function()
+            menu:open()
+        end)
 
         -- Add note
         mp.add_forced_key_binding("Ctrl+n", "mpvacious-export-note", menu:with_update { export_to_anki, false })
 
         -- Note updating
+        mp.add_key_binding("Ctrl+b", "mpvacious-update-selected-note", menu:with_update { update_selected_note, false })
+        mp.add_key_binding("Ctrl+B", "mpvacious-overwrite-selected-note", menu:with_update { update_selected_note, true })
         mp.add_key_binding("Ctrl+m", "mpvacious-update-last-note", menu:with_update { update_last_note, false })
         mp.add_key_binding("Ctrl+M", "mpvacious-overwrite-last-note", menu:with_update { update_last_note, true })
+
+        mp.add_key_binding("g", "mpvacious-quick-card-menu-open", function()
+            quick_menu:open()
+        end)
+        mp.add_key_binding("Alt+g", "mpvacious-quick-card-sel-menu-open", function()
+            quick_menu_card:open()
+        end)
 
         -- Vim-like seeking between subtitle lines
         mp.add_key_binding("H", "mpvacious-sub-seek-back", _ { play_control.sub_seek, 'backward' })
