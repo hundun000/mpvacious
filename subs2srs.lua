@@ -401,6 +401,15 @@ local function export_to_anki(gui)
         sub['text'] = string.format("mpvacious wasn't able to grab subtitles (%s)", os.time())
     end
 
+    -- --- 安全拦截：忽略超长特效行 ---
+    local duration = sub['end'] - sub['start']
+    if duration > 60 then 
+        print("检测到超长干扰行 (" .. duration .. "秒)，正在尝试寻找正常对话...")
+        -- 强制重置为当前播放点附近的单行字幕，不使用这种全剧覆盖的行
+        sub = subs_observer.get_current_subtitle() 
+    end
+    -- ----------------------------
+
     encoder.set_output_dir(get_anki_media_dir_path())
     local snapshot = encoder.snapshot.create_job(sub)
     local audio = encoder.audio.create_job(sub, audio_padding())
@@ -589,6 +598,18 @@ function menu:print_header(osd)
     osd:item('Active profile: '):text(profiles.active):newline()
     osd:item('Deck: '):text(config.deck_name):newline()
     osd:item('# cards: '):text(quick_creation_opts:get_cards()):newline()
+    osd:submenu('准备阶段：'):newline()
+    osd:tab():item('j: '):text('切换底部字幕（主）'):newline()
+    osd:tab():item('ctrl+j: '):text('切换顶部字幕（副）'):newline()
+    osd:tab():item('alt+m: '):text('切换 two-line subtitles'):newline()
+    osd:submenu('制卡阶段：'):newline()
+    osd:tab():text('1. 暂停视频。'):newline()
+    osd:tab():text('2. 在 Yomitan 查词窗口中点击 加号键。'):newline()
+    osd:tab():text('3. 点击 mpv 窗口，然后按下 Ctrl + m。'):newline()
+    osd:submenu('制卡相关快捷键：'):newline()
+    osd:tab():item('鼠标右键: '):text('开始/暂停播放'):newline()
+    osd:tab():item('ctrl+左右箭头: '):text('跳到上句/下句字幕开始处'):newline()
+    osd:tab():item('ctrl+m: '):text('Update the last added note '):italics('(+shift to overwrite)'):newline()
 end
 
 function menu:print_bindings(osd)

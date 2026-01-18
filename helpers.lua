@@ -143,6 +143,7 @@ local is_monolingual = false
 
 this.toggle_monolingual_subtitles = function ()
     is_monolingual = not is_monolingual
+    this.notify("is_monolingual = " + is_monolingual)
 end
 
 this.get_japanese_from_subtext = function(text)
@@ -188,6 +189,8 @@ end
 this.containsNonSimplifiedChinese = function(str)
     -- 简单判断是否包含日文汉字的范围，例如，常用日文汉字 (这个范围可能需要根据需求进一步细化)
     return str:match("[\228\184\128-\233\191\191]")
+end
+
 this.subprocess_detached = function(args, completion_fn)
     local overwrite_settings = {
         detach = true,
